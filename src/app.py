@@ -5,11 +5,14 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
+from fastapi import Body
 import os
 from pathlib import Path
+import json
+import uuid
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -83,13 +86,60 @@ def root():
     return RedirectResponse(url="/static/index.html")
 
 
+# --- Simple admin auth based on a local JSON file ---
+TOKENS: dict[str, str] = {}
+
+def load_teachers() -> dict:
+    teachers_path = Path(__file__).parent / "teachers.json"
+    if not teachers_path.exists():
+        return {"teachers": []}
+    with open(teachers_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def require_admin(request: Request):
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Admin authorization required")
+    token = auth.split(" ", 1)[1]
+    if token not in TOKENS:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return TOKENS[token]
+
+
+@app.post("/login")
+def login(payload: dict = Body(...)):
+    """Login with username and password from teachers.json; returns a bearer token."""
+    username = payload.get("username")
+    password = payload.get("password")
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Username and password required")
+
+    data = load_teachers()
+    for t in data.get("teachers", []):
+        if t.get("username") == username and t.get("password") == password:
+            token = uuid.uuid4().hex
+            TOKENS[token] = username
+            return {"token": token, "username": username}
+    raise HTTPException(status_code=401, detail="Invalid credentials")
+
+
+@app.post("/logout")
+def logout(user: str = Depends(require_admin), request: Request = None):
+    auth = request.headers.get("Authorization", "") if request else ""
+    token = auth.split(" ", 1)[1] if " " in auth else ""
+    if token in TOKENS:
+        del TOKENS[token]
+    return {"message": "Logged out"}
+
+
 @app.get("/activities")
 def get_activities():
     return activities
 
 
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
+def signup_for_activity(activity_name: str, email: str, user: str = Depends(require_admin)):
     """Sign up a student for an activity"""
     # Validate activity exists
     if activity_name not in activities:
@@ -111,7 +161,7 @@ def signup_for_activity(activity_name: str, email: str):
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
+def unregister_from_activity(activity_name: str, email: str, user: str = Depends(require_admin)):
     """Unregister a student from an activity"""
     # Validate activity exists
     if activity_name not in activities:
